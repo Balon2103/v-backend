@@ -1,66 +1,97 @@
-// server.js
-// Punto de entrada del servidor Node.js + Express
-
 require("dotenv").config();
-const express   = require("express");
-const cors      = require("cors");
+
+const express = require("express");
+const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 
 const authRoutes = require("./routes/auth");
 
-const app  = express();
+const pool = require("./config/db");
+
+const initDatabase = require("./initDatabase");
+
+const app = express();
+
 const PORT = process.env.PORT || 3001;
 
-// ── Middlewares globales ────────────────────────────────────
-app.use(cors({
-  origin: [
-    "http://localhost:5173", // Vite dev server
-    "http://localhost:3000",
-    "http://127.0.0.1:5173",
-  ],
-  methods:      ["GET", "POST", "PUT", "PATCH", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  credentials:  true,
-}));
+// CORS
+app.use(
+  cors({
+    origin: ["http://localhost:5173", "https://v-frontend-qgzd.onrender.com"],
+
+    credentials: true,
+  }),
+);
 
 app.use(express.json());
+
 app.use(express.urlencoded({ extended: true }));
 
-// ── Rate limiting para login ────────────────────────────────
-// Máximo 10 intentos cada 15 minutos por IP
+// Rate limit login
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max:      10,
-  message: {
-    ok:      false,
-    mensaje: "Demasiados intentos fallidos. Intente nuevamente en 15 minutos.",
-  },
-  standardHeaders: true,
-  legacyHeaders:   false,
+
+  max: 10,
 });
 
 app.use("/api/auth/login", loginLimiter);
 
-// ── Rutas ───────────────────────────────────────────────────
+// Rutas
 app.use("/api/auth", authRoutes);
 
-// ── Ruta de verificación (health check) ─────────────────────
+// Health check
 app.get("/api/health", (req, res) => {
   res.json({
-    ok:      true,
-    mensaje: "Servidor funcionando correctamente",
-    fecha:   new Date().toISOString(),
+    ok: true,
+
+    mensaje: "Servidor funcionando",
   });
 });
 
-// ── Ruta no encontrada ──────────────────────────────────────
-app.use((req, res) => {
-  res.status(404).json({ ok: false, mensaje: "Ruta no encontrada." });
+// Test PostgreSQL
+app.get("/api/db-test", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT NOW()");
+
+    res.json({
+      ok: true,
+
+      serverTime: result.rows[0],
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      ok: false,
+
+      error: error.message,
+    });
+  }
 });
 
-// ── Inicio del servidor ─────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`\n🚀  Servidor corriendo en http://localhost:${PORT}`);
-  console.log(`   Entorno: ${process.env.NODE_ENV || "development"}`);
-  console.log(`   Health check: http://localhost:${PORT}/api/health\n`);
+// Ruta no encontrada
+app.use((req, res) => {
+  res.status(404).json({
+    ok: false,
+
+    mensaje: "Ruta no encontrada",
+  });
 });
+
+// Iniciar servidor
+async function startServer() {
+  try {
+    // Inicializar schema.sql
+    await initDatabase();
+
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+    });
+  } catch (error) {
+    console.error("❌ Error iniciando servidor:");
+
+    console.error(error);
+  }
+}
+
+startServer();
