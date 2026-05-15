@@ -1,5 +1,5 @@
 // controllers/authController.js
-const bcrypt = require("bcrypt");
+const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const db = require("../config/db");
 
@@ -81,7 +81,7 @@ async function login(req, res) {
       ok: true,
       mensaje: `Bienvenido, ${usuario.nombre}`,
       token,
-      usuario: {
+      user: {
         id: usuario.id,
         nombre: `${usuario.nombre} ${usuario.apellido}`,
         email: usuario.email,
