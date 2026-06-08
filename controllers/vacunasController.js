@@ -1,6 +1,22 @@
 // controllers/vacunasController.js
 const db = require("../config/db");
 
+// Convierte texto de dosis al número correspondiente
+const MAPA_DOSIS = {
+  Única: 1,
+  "1ra dosis": 1,
+  "2da dosis": 2,
+  "3ra dosis": 3,
+  Refuerzo: 4,
+};
+
+function parsearDosis(dosis) {
+  if (!dosis) return 1;
+  if (MAPA_DOSIS[dosis] !== undefined) return MAPA_DOSIS[dosis];
+  const n = parseInt(dosis);
+  return isNaN(n) ? 1 : n;
+}
+
 // ── GET /api/vacunas ────────────────────────────────────────
 async function listar(req, res) {
   try {
@@ -35,10 +51,10 @@ async function listar(req, res) {
       `SELECT
          va.id,
          p.cedula,
-         p.nombre || ' ' || p.apellido AS paciente,
+         p.nombre    || ' ' || p.apellido AS paciente,
          p.telefono,
          p.email,
-         tv.nombre   AS vacuna,
+         tv.nombre    AS vacuna,
          va.num_dosis AS dosis,
          va.lote,
          va.fecha_aplicacion AS fecha,
@@ -55,12 +71,18 @@ async function listar(req, res) {
       [...params, parseInt(limit), offset],
     );
 
+    // Convertir num_dosis a texto legible para el frontend
+    const registros = result.rows.map((r) => ({
+      ...r,
+      dosis: dosisATexto(r.dosis),
+    }));
+
     return res.json({
       ok: true,
       total,
       pagina: parseInt(page),
       limite: parseInt(limit),
-      registros: result.rows,
+      registros,
     });
   } catch (err) {
     console.error("[listar vacunas]", err.message);
@@ -156,7 +178,7 @@ async function historialPaciente(req, res) {
     const historial = await db.query(
       `SELECT
          va.id,
-         tv.nombre AS vacuna,
+         tv.nombre    AS vacuna,
          va.num_dosis AS dosis,
          va.lote,
          va.fecha_aplicacion AS fecha,
@@ -170,11 +192,12 @@ async function historialPaciente(req, res) {
       [req.params.cedula],
     );
 
-    return res.json({
-      ok: true,
-      paciente: pac.rows[0],
-      historial: historial.rows,
-    });
+    const rows = historial.rows.map((r) => ({
+      ...r,
+      dosis: dosisATexto(r.dosis),
+    }));
+
+    return res.json({ ok: true, paciente: pac.rows[0], historial: rows });
   } catch (err) {
     console.error("[historial paciente]", err.message);
     return res
@@ -197,9 +220,12 @@ async function obtener(req, res) {
          COALESCE(p.email,'')     AS email,
          COALESCE(p.direccion,'') AS direccion,
          p.fecha_nacimiento, p.sexo,
-         tv.nombre AS vacuna, tv.id AS tipo_vacuna_id,
+         tv.nombre    AS vacuna,
+         tv.id        AS tipo_vacuna_id,
          va.num_dosis AS dosis,
-         va.lote, va.fecha_aplicacion AS fecha, va.observaciones,
+         va.lote,
+         va.fecha_aplicacion AS fecha,
+         va.observaciones,
          u.id AS vacunador_id,
          u.nombre || ' ' || u.apellido AS vacunador
        FROM vacunas_aplicadas va
@@ -209,11 +235,14 @@ async function obtener(req, res) {
        WHERE va.id = $1`,
       [req.params.id],
     );
+
     if (result.rows.length === 0)
       return res
         .status(404)
         .json({ ok: false, mensaje: "Registro no encontrado." });
-    return res.json({ ok: true, registro: result.rows[0] });
+
+    const r = { ...result.rows[0], dosis: dosisATexto(result.rows[0].dosis) };
+    return res.json({ ok: true, registro: r });
   } catch (err) {
     console.error("[obtener vacuna]", err.message);
     return res
@@ -228,7 +257,7 @@ async function obtener(req, res) {
 
 // ── POST /api/vacunas ───────────────────────────────────────
 async function registrar(req, res) {
-  console.log("[registrar vacuna] body recibido:", JSON.stringify(req.body));
+  console.log("[registrar vacuna] body:", JSON.stringify(req.body));
 
   const {
     cedula,
@@ -244,10 +273,10 @@ async function registrar(req, res) {
     lote,
     fecha_aplicacion,
     observaciones,
-    vacunador_id, // ← campo nuevo: ID del vacunador seleccionado
+    vacunador_id,
   } = req.body;
 
-  // Validaciones
+  // ── Validaciones ──────────────────────────────────────────
   if (!cedula || !nombre || !apellido) {
     return res
       .status(400)
@@ -272,10 +301,11 @@ async function registrar(req, res) {
       .json({ ok: false, mensaje: "La fecha de aplicación es obligatoria." });
   }
 
-  // El vacunador: si se seleccionó uno usa ese, si no usa el usuario autenticado
+  // Convertir dosis de texto a número (SMALLINT)
+  const numDosis = parsearDosis(dosis);
   const idVacunador = vacunador_id ? parseInt(vacunador_id) : req.usuario.id;
 
-  // Verificar que el tipo de vacuna existe
+  // Verificar tipo de vacuna
   const tipoCheck = await db.query(
     "SELECT id FROM tipos_vacuna WHERE id = $1",
     [parseInt(tipo_vacuna_id)],
@@ -289,7 +319,7 @@ async function registrar(req, res) {
       });
   }
 
-  // Verificar que el vacunador existe
+  // Verificar vacunador
   const vacCheck = await db.query(
     "SELECT id FROM usuarios WHERE id = $1 AND activo = true",
     [idVacunador],
@@ -307,7 +337,7 @@ async function registrar(req, res) {
   try {
     await client.query("BEGIN");
 
-    // Buscar o crear paciente
+    // ── Buscar o crear paciente ───────────────────────────
     let pacienteId;
     const pacExiste = await client.query(
       "SELECT id FROM pacientes WHERE cedula = $1",
@@ -316,8 +346,6 @@ async function registrar(req, res) {
 
     if (pacExiste.rows.length > 0) {
       pacienteId = pacExiste.rows[0].id;
-
-      // Actualizar datos del paciente
       await client.query(
         `UPDATE pacientes SET
            nombre         = $1,
@@ -336,12 +364,8 @@ async function registrar(req, res) {
           pacienteId,
         ],
       );
-      console.log(
-        "[registrar vacuna] Paciente existente actualizado, id:",
-        pacienteId,
-      );
+      console.log("[registrar vacuna] Paciente actualizado, id:", pacienteId);
     } else {
-      // Nuevo paciente — fecha_nacimiento y sexo son requeridos
       if (!fecha_nacimiento || !sexo) {
         await client.query("ROLLBACK");
         return res.status(400).json({
@@ -350,8 +374,7 @@ async function registrar(req, res) {
             "Para un nuevo paciente se requieren fecha de nacimiento y sexo.",
         });
       }
-
-      const nuevoPac = await client.query(
+      const nuevo = await client.query(
         `INSERT INTO pacientes
            (cedula, nombre, apellido, fecha_nacimiento, sexo, telefono, email, direccion)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
@@ -367,11 +390,11 @@ async function registrar(req, res) {
           direccion || null,
         ],
       );
-      pacienteId = nuevoPac.rows[0].id;
+      pacienteId = nuevo.rows[0].id;
       console.log("[registrar vacuna] Nuevo paciente creado, id:", pacienteId);
     }
 
-    // Registrar la vacuna aplicada
+    // ── Registrar vacuna aplicada ─────────────────────────
     const vacResult = await client.query(
       `INSERT INTO vacunas_aplicadas
          (paciente_id, tipo_vacuna_id, usuario_id, num_dosis, lote, fecha_aplicacion, observaciones)
@@ -381,18 +404,20 @@ async function registrar(req, res) {
         pacienteId,
         parseInt(tipo_vacuna_id),
         idVacunador,
-        dosis,
+        numDosis, // ← número, no texto
         lote || null,
         fecha_aplicacion,
         observaciones || null,
       ],
     );
     console.log(
-      "[registrar vacuna] Vacuna registrada, id:",
+      "[registrar vacuna] Registrada con id:",
       vacResult.rows[0].id,
+      "dosis:",
+      numDosis,
     );
 
-    // Descontar del inventario
+    // ── Descontar del inventario ──────────────────────────
     await client.query(
       `UPDATE inventario SET
          stock_actual   = GREATEST(0, stock_actual - 1),
@@ -401,7 +426,7 @@ async function registrar(req, res) {
       [parseInt(tipo_vacuna_id)],
     );
 
-    // Registrar movimiento de salida
+    // ── Movimiento de salida ──────────────────────────────
     await client.query(
       `INSERT INTO movimientos_inventario
          (tipo_vacuna_id, usuario_id, tipo_movimiento, cantidad, lote, fecha_movimiento)
@@ -419,15 +444,25 @@ async function registrar(req, res) {
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("[registrar vacuna] ERROR:", err.message);
-    console.error("[registrar vacuna] STACK:", err.stack);
     return res.status(500).json({
       ok: false,
       mensaje: "Error interno del servidor.",
-      detalle: err.message, // visible en desarrollo para depurar
+      detalle: err.message,
     });
   } finally {
     client.release();
   }
+}
+
+// ── Helper: número de dosis → texto legible ─────────────────
+function dosisATexto(num) {
+  const MAPA = {
+    1: "1ra dosis",
+    2: "2da dosis",
+    3: "3ra dosis",
+    4: "Refuerzo",
+  };
+  return MAPA[num] || `Dosis ${num}`;
 }
 
 module.exports = { listar, obtener, registrar, historialPaciente, vacunadores };
