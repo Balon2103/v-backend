@@ -2,7 +2,6 @@
 const db = require("../config/db");
 
 // ── GET /api/vacunas ────────────────────────────────────────
-// Listar todas las vacunas aplicadas con datos del paciente
 async function listar(req, res) {
   try {
     const { cedula, vacuna, page = 1, limit = 10 } = req.query;
@@ -13,17 +12,18 @@ async function listar(req, res) {
     let idx = 1;
 
     if (cedula) {
-      where += ` AND p.cedula ILIKE $${idx++}`;
+      where += ` AND (p.cedula ILIKE $${idx} OR CONCAT(p.nombre,' ',p.apellido) ILIKE $${idx})`;
       params.push(`%${cedula}%`);
+      idx++;
     }
     if (vacuna) {
       where += ` AND tv.nombre = $${idx++}`;
       params.push(vacuna);
     }
 
-    // Total para paginación
     const countResult = await db.query(
-      `SELECT COUNT(*) FROM vacunas_aplicadas va
+      `SELECT COUNT(*)
+       FROM vacunas_aplicadas va
        JOIN pacientes    p  ON va.paciente_id    = p.id
        JOIN tipos_vacuna tv ON va.tipo_vacuna_id = tv.id
        ${where}`,
@@ -31,12 +31,11 @@ async function listar(req, res) {
     );
     const total = parseInt(countResult.rows[0].count);
 
-    // Datos paginados
     const result = await db.query(
       `SELECT
          va.id,
          p.cedula,
-         p.nombre    || ' ' || p.apellido AS paciente,
+         p.nombre || ' ' || p.apellido AS paciente,
          p.telefono,
          p.email,
          tv.nombre   AS vacuna,
@@ -44,7 +43,7 @@ async function listar(req, res) {
          va.lote,
          va.fecha_aplicacion AS fecha,
          va.observaciones,
-         u.nombre    || ' ' || u.apellido AS vacunador,
+         u.nombre || ' ' || u.apellido AS vacunador,
          va.creado_en
        FROM vacunas_aplicadas va
        JOIN pacientes    p  ON va.paciente_id    = p.id
@@ -64,10 +63,127 @@ async function listar(req, res) {
       registros: result.rows,
     });
   } catch (err) {
-    console.error("[listar vacunas]", err);
+    console.error("[listar vacunas]", err.message);
     return res
       .status(500)
-      .json({ ok: false, mensaje: "Error interno del servidor." });
+      .json({
+        ok: false,
+        mensaje: "Error interno del servidor.",
+        detalle: err.message,
+      });
+  }
+}
+
+// ── GET /api/vacunas/vacunadores ────────────────────────────
+async function vacunadores(req, res) {
+  try {
+    const result = await db.query(
+      `SELECT
+         u.id,
+         u.nombre || ' ' || u.apellido AS nombre,
+         u.email,
+         r.nombre AS rol,
+         COUNT(va.id)                   AS total_vacunas,
+         COUNT(DISTINCT va.paciente_id) AS total_pacientes,
+         MAX(va.fecha_aplicacion)       AS ultima_aplicacion,
+         MIN(va.fecha_aplicacion)       AS primera_aplicacion
+       FROM usuarios u
+       JOIN roles r ON u.rol_id = r.id
+       LEFT JOIN vacunas_aplicadas va ON va.usuario_id = u.id
+       WHERE u.activo = true
+       GROUP BY u.id, u.nombre, u.apellido, u.email, r.nombre
+       ORDER BY total_vacunas DESC`,
+    );
+
+    const detalle = await db.query(
+      `SELECT
+         u.id AS usuario_id,
+         tv.nombre AS vacuna,
+         COUNT(*) AS cantidad
+       FROM vacunas_aplicadas va
+       JOIN usuarios     u  ON va.usuario_id     = u.id
+       JOIN tipos_vacuna tv ON va.tipo_vacuna_id = tv.id
+       GROUP BY u.id, tv.nombre
+       ORDER BY u.id, cantidad DESC`,
+    );
+
+    const detalleMap = {};
+    detalle.rows.forEach((d) => {
+      if (!detalleMap[d.usuario_id]) detalleMap[d.usuario_id] = [];
+      detalleMap[d.usuario_id].push({
+        vacuna: d.vacuna,
+        cantidad: parseInt(d.cantidad),
+      });
+    });
+
+    const lista = result.rows.map((v) => ({
+      ...v,
+      total_vacunas: parseInt(v.total_vacunas),
+      total_pacientes: parseInt(v.total_pacientes),
+      detalle_vacunas: detalleMap[v.id] || [],
+    }));
+
+    return res.json({ ok: true, vacunadores: lista });
+  } catch (err) {
+    console.error("[vacunadores]", err.message);
+    return res
+      .status(500)
+      .json({
+        ok: false,
+        mensaje: "Error interno del servidor.",
+        detalle: err.message,
+      });
+  }
+}
+
+// ── GET /api/vacunas/paciente/:cedula ───────────────────────
+async function historialPaciente(req, res) {
+  try {
+    const pac = await db.query(
+      `SELECT cedula, nombre, apellido, fecha_nacimiento,
+              sexo, telefono,
+              COALESCE(email, '')     AS email,
+              COALESCE(direccion, '') AS direccion
+       FROM pacientes WHERE cedula = $1`,
+      [req.params.cedula],
+    );
+
+    if (pac.rows.length === 0)
+      return res
+        .status(404)
+        .json({ ok: false, mensaje: "Paciente no encontrado." });
+
+    const historial = await db.query(
+      `SELECT
+         va.id,
+         tv.nombre AS vacuna,
+         va.num_dosis AS dosis,
+         va.lote,
+         va.fecha_aplicacion AS fecha,
+         va.observaciones,
+         u.nombre || ' ' || u.apellido AS vacunador
+       FROM vacunas_aplicadas va
+       JOIN tipos_vacuna tv ON va.tipo_vacuna_id = tv.id
+       JOIN usuarios     u  ON va.usuario_id     = u.id
+       WHERE va.paciente_id = (SELECT id FROM pacientes WHERE cedula = $1)
+       ORDER BY va.fecha_aplicacion DESC`,
+      [req.params.cedula],
+    );
+
+    return res.json({
+      ok: true,
+      paciente: pac.rows[0],
+      historial: historial.rows,
+    });
+  } catch (err) {
+    console.error("[historial paciente]", err.message);
+    return res
+      .status(500)
+      .json({
+        ok: false,
+        mensaje: "Error interno del servidor.",
+        detalle: err.message,
+      });
   }
 }
 
@@ -77,11 +193,14 @@ async function obtener(req, res) {
     const result = await db.query(
       `SELECT
          va.id,
-         p.cedula, p.nombre, p.apellido, p.telefono, p.email,
-         p.fecha_nacimiento, p.sexo, p.direccion,
+         p.cedula, p.nombre, p.apellido, p.telefono,
+         COALESCE(p.email,'')     AS email,
+         COALESCE(p.direccion,'') AS direccion,
+         p.fecha_nacimiento, p.sexo,
          tv.nombre AS vacuna, tv.id AS tipo_vacuna_id,
          va.num_dosis AS dosis,
          va.lote, va.fecha_aplicacion AS fecha, va.observaciones,
+         u.id AS vacunador_id,
          u.nombre || ' ' || u.apellido AS vacunador
        FROM vacunas_aplicadas va
        JOIN pacientes    p  ON va.paciente_id    = p.id
@@ -96,16 +215,21 @@ async function obtener(req, res) {
         .json({ ok: false, mensaje: "Registro no encontrado." });
     return res.json({ ok: true, registro: result.rows[0] });
   } catch (err) {
-    console.error("[obtener vacuna]", err);
+    console.error("[obtener vacuna]", err.message);
     return res
       .status(500)
-      .json({ ok: false, mensaje: "Error interno del servidor." });
+      .json({
+        ok: false,
+        mensaje: "Error interno del servidor.",
+        detalle: err.message,
+      });
   }
 }
 
 // ── POST /api/vacunas ───────────────────────────────────────
-// Registrar vacuna aplicada (crea paciente si no existe)
 async function registrar(req, res) {
+  console.log("[registrar vacuna] body recibido:", JSON.stringify(req.body));
+
   const {
     cedula,
     nombre,
@@ -120,22 +244,63 @@ async function registrar(req, res) {
     lote,
     fecha_aplicacion,
     observaciones,
+    vacunador_id, // ← campo nuevo: ID del vacunador seleccionado
   } = req.body;
 
   // Validaciones
-  if (
-    !cedula ||
-    !nombre ||
-    !apellido ||
-    !tipo_vacuna_id ||
-    !dosis ||
-    !fecha_aplicacion
-  ) {
-    return res.status(400).json({
-      ok: false,
-      mensaje:
-        "Cédula, nombre, apellido, vacuna, dosis y fecha son obligatorios.",
-    });
+  if (!cedula || !nombre || !apellido) {
+    return res
+      .status(400)
+      .json({
+        ok: false,
+        mensaje: "Cédula, nombre y apellido son obligatorios.",
+      });
+  }
+  if (!tipo_vacuna_id) {
+    return res
+      .status(400)
+      .json({ ok: false, mensaje: "Debe seleccionar el tipo de vacuna." });
+  }
+  if (!dosis) {
+    return res
+      .status(400)
+      .json({ ok: false, mensaje: "Debe seleccionar el número de dosis." });
+  }
+  if (!fecha_aplicacion) {
+    return res
+      .status(400)
+      .json({ ok: false, mensaje: "La fecha de aplicación es obligatoria." });
+  }
+
+  // El vacunador: si se seleccionó uno usa ese, si no usa el usuario autenticado
+  const idVacunador = vacunador_id ? parseInt(vacunador_id) : req.usuario.id;
+
+  // Verificar que el tipo de vacuna existe
+  const tipoCheck = await db.query(
+    "SELECT id FROM tipos_vacuna WHERE id = $1",
+    [parseInt(tipo_vacuna_id)],
+  );
+  if (tipoCheck.rows.length === 0) {
+    return res
+      .status(400)
+      .json({
+        ok: false,
+        mensaje: "El tipo de vacuna seleccionado no existe.",
+      });
+  }
+
+  // Verificar que el vacunador existe
+  const vacCheck = await db.query(
+    "SELECT id FROM usuarios WHERE id = $1 AND activo = true",
+    [idVacunador],
+  );
+  if (vacCheck.rows.length === 0) {
+    return res
+      .status(400)
+      .json({
+        ok: false,
+        mensaje: "El vacunador seleccionado no existe o está inactivo.",
+      });
   }
 
   const client = await db.connect();
@@ -151,35 +316,41 @@ async function registrar(req, res) {
 
     if (pacExiste.rows.length > 0) {
       pacienteId = pacExiste.rows[0].id;
-      // Actualizar datos si se enviaron
+
+      // Actualizar datos del paciente
       await client.query(
         `UPDATE pacientes SET
-           nombre           = COALESCE($1, nombre),
-           apellido         = COALESCE($2, apellido),
-           telefono         = COALESCE($3, telefono),
-           email            = COALESCE($4, email),
-           direccion        = COALESCE($5, direccion),
-           actualizado_en   = NOW()
+           nombre         = $1,
+           apellido       = $2,
+           telefono       = COALESCE($3, telefono),
+           email          = COALESCE($4, email),
+           direccion      = COALESCE($5, direccion),
+           actualizado_en = NOW()
          WHERE id = $6`,
         [
-          nombre,
-          apellido,
+          nombre.trim(),
+          apellido.trim(),
           telefono || null,
           email || null,
           direccion || null,
           pacienteId,
         ],
       );
+      console.log(
+        "[registrar vacuna] Paciente existente actualizado, id:",
+        pacienteId,
+      );
     } else {
-      // Crear nuevo paciente
+      // Nuevo paciente — fecha_nacimiento y sexo son requeridos
       if (!fecha_nacimiento || !sexo) {
         await client.query("ROLLBACK");
         return res.status(400).json({
           ok: false,
           mensaje:
-            "Para un nuevo paciente se requiere fecha de nacimiento y sexo.",
+            "Para un nuevo paciente se requieren fecha de nacimiento y sexo.",
         });
       }
+
       const nuevoPac = await client.query(
         `INSERT INTO pacientes
            (cedula, nombre, apellido, fecha_nacimiento, sexo, telefono, email, direccion)
@@ -197,9 +368,10 @@ async function registrar(req, res) {
         ],
       );
       pacienteId = nuevoPac.rows[0].id;
+      console.log("[registrar vacuna] Nuevo paciente creado, id:", pacienteId);
     }
 
-    // Registrar vacuna aplicada
+    // Registrar la vacuna aplicada
     const vacResult = await client.query(
       `INSERT INTO vacunas_aplicadas
          (paciente_id, tipo_vacuna_id, usuario_id, num_dosis, lote, fecha_aplicacion, observaciones)
@@ -208,12 +380,16 @@ async function registrar(req, res) {
       [
         pacienteId,
         parseInt(tipo_vacuna_id),
-        req.usuario.id,
+        idVacunador,
         dosis,
         lote || null,
         fecha_aplicacion,
         observaciones || null,
       ],
+    );
+    console.log(
+      "[registrar vacuna] Vacuna registrada, id:",
+      vacResult.rows[0].id,
     );
 
     // Descontar del inventario
@@ -230,12 +406,7 @@ async function registrar(req, res) {
       `INSERT INTO movimientos_inventario
          (tipo_vacuna_id, usuario_id, tipo_movimiento, cantidad, lote, fecha_movimiento)
        VALUES ($1,$2,'salida',1,$3,$4)`,
-      [
-        parseInt(tipo_vacuna_id),
-        req.usuario.id,
-        lote || null,
-        fecha_aplicacion,
-      ],
+      [parseInt(tipo_vacuna_id), idVacunador, lote || null, fecha_aplicacion],
     );
 
     await client.query("COMMIT");
@@ -247,121 +418,15 @@ async function registrar(req, res) {
     });
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error("[registrar vacuna]", err);
-    return res
-      .status(500)
-      .json({ ok: false, mensaje: "Error interno del servidor." });
+    console.error("[registrar vacuna] ERROR:", err.message);
+    console.error("[registrar vacuna] STACK:", err.stack);
+    return res.status(500).json({
+      ok: false,
+      mensaje: "Error interno del servidor.",
+      detalle: err.message, // visible en desarrollo para depurar
+    });
   } finally {
     client.release();
-  }
-}
-
-// ── GET /api/vacunas/paciente/:cedula ───────────────────────
-// Historial de un paciente por cédula
-async function historialPaciente(req, res) {
-  try {
-    const result = await db.query(
-      `SELECT
-         va.id,
-         tv.nombre AS vacuna,
-         va.num_dosis AS dosis,
-         va.lote,
-         va.fecha_aplicacion AS fecha,
-         va.observaciones,
-         u.nombre || ' ' || u.apellido AS vacunador
-       FROM vacunas_aplicadas va
-       JOIN tipos_vacuna tv ON va.tipo_vacuna_id = tv.id
-       JOIN usuarios     u  ON va.usuario_id     = u.id
-       JOIN pacientes    p  ON va.paciente_id    = p.id
-       WHERE p.cedula = $1
-       ORDER BY va.fecha_aplicacion DESC`,
-      [req.params.cedula],
-    );
-
-    // Datos del paciente
-    const pac = await db.query(
-      `SELECT cedula, nombre, apellido, fecha_nacimiento,
-              sexo, telefono, email, direccion
-       FROM pacientes WHERE cedula = $1`,
-      [req.params.cedula],
-    );
-
-    if (pac.rows.length === 0)
-      return res
-        .status(404)
-        .json({ ok: false, mensaje: "Paciente no encontrado." });
-
-    return res.json({
-      ok: true,
-      paciente: pac.rows[0],
-      historial: result.rows,
-    });
-  } catch (err) {
-    console.error("[historial paciente]", err);
-    return res
-      .status(500)
-      .json({ ok: false, mensaje: "Error interno del servidor." });
-  }
-}
-
-// ── GET /api/vacunas/vacunadores ────────────────────────────
-// Record de todos los vacunadores del ASIC
-async function vacunadores(req, res) {
-  try {
-    const result = await db.query(
-      `SELECT
-         u.id,
-         u.nombre || ' ' || u.apellido AS nombre,
-         u.email,
-         r.nombre AS rol,
-         COUNT(va.id)                        AS total_vacunas,
-         COUNT(DISTINCT va.paciente_id)      AS total_pacientes,
-         MAX(va.fecha_aplicacion)            AS ultima_aplicacion,
-         MIN(va.fecha_aplicacion)            AS primera_aplicacion
-       FROM usuarios u
-       JOIN roles r ON u.rol_id = r.id
-       LEFT JOIN vacunas_aplicadas va ON va.usuario_id = u.id
-       WHERE u.activo = true
-       GROUP BY u.id, u.nombre, u.apellido, u.email, r.nombre
-       ORDER BY total_vacunas DESC`,
-    );
-
-    // Detalle por tipo de vacuna por cada vacunador
-    const detalle = await db.query(
-      `SELECT
-         u.id AS usuario_id,
-         tv.nombre AS vacuna,
-         COUNT(*) AS cantidad
-       FROM vacunas_aplicadas va
-       JOIN usuarios     u  ON va.usuario_id     = u.id
-       JOIN tipos_vacuna tv ON va.tipo_vacuna_id = tv.id
-       GROUP BY u.id, tv.nombre
-       ORDER BY u.id, cantidad DESC`,
-    );
-
-    // Agrupar detalle por vacunador
-    const detalleMap = {};
-    detalle.rows.forEach((d) => {
-      if (!detalleMap[d.usuario_id]) detalleMap[d.usuario_id] = [];
-      detalleMap[d.usuario_id].push({
-        vacuna: d.vacuna,
-        cantidad: parseInt(d.cantidad),
-      });
-    });
-
-    const vacunadoresConDetalle = result.rows.map((v) => ({
-      ...v,
-      total_vacunas: parseInt(v.total_vacunas),
-      total_pacientes: parseInt(v.total_pacientes),
-      detalle_vacunas: detalleMap[v.id] || [],
-    }));
-
-    return res.json({ ok: true, vacunadores: vacunadoresConDetalle });
-  } catch (err) {
-    console.error("[vacunadores]", err);
-    return res
-      .status(500)
-      .json({ ok: false, mensaje: "Error interno del servidor." });
   }
 }
 
