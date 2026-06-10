@@ -4,10 +4,10 @@ const express = require("express");
 const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const path = require("path");
-
 const authRoutes = require("./routes/auth");
 const vacunasRoutes = require("./routes/vacunas");
-const inventarioRoutes = require("./routes/inventario"); // ← nuevo
+const inventarioRoutes = require("./routes/inventario");
+const reportesRoutes = require("./routes/reportes"); // ← nuevo
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -36,6 +36,25 @@ async function ejecutarMigraciones() {
       nombre: "movimientos_inventario.observaciones",
       sql: `ALTER TABLE movimientos_inventario ADD COLUMN IF NOT EXISTS observaciones TEXT DEFAULT NULL`,
     },
+    // ── Migraciones para reportes ───────────────────────────
+    {
+      nombre: "vacunas_aplicadas.dosis",
+      sql: `ALTER TABLE vacunas_aplicadas ADD COLUMN IF NOT EXISTS dosis INTEGER DEFAULT 1`,
+    },
+    {
+      nombre: "movimientos_inventario.tipo_check",
+      sql: `DO $$
+            BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'movimientos_inventario_tipo_check'
+              ) THEN
+                ALTER TABLE movimientos_inventario
+                  ADD CONSTRAINT movimientos_inventario_tipo_check
+                  CHECK (tipo IN ('entrada', 'salida'));
+              END IF;
+            END$$`,
+    },
   ];
 
   console.log("\n🔄  Verificando migraciones...");
@@ -62,10 +81,10 @@ app.use(
     credentials: true,
   }),
 );
-
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// ── Rate limiting ───────────────────────────────────────────
 app.use(
   "/api/auth/login",
   rateLimit({
@@ -78,10 +97,25 @@ app.use(
   }),
 );
 
+// Rate limit más permisivo para exportaciones de reportes
+// (generan más carga que una consulta normal)
+app.use(
+  "/api/reportes",
+  rateLimit({
+    windowMs: 60 * 1000, // ventana de 1 minuto
+    max: 30, // 30 peticiones por minuto por IP
+    message: {
+      ok: false,
+      mensaje: "Demasiadas solicitudes a reportes. Intente en un momento.",
+    },
+  }),
+);
+
 // ── Rutas ───────────────────────────────────────────────────
 app.use("/api/auth", authRoutes);
 app.use("/api/vacunas", vacunasRoutes);
-app.use("/api/inventario", inventarioRoutes); // ← nuevo
+app.use("/api/inventario", inventarioRoutes);
+app.use("/api/reportes", reportesRoutes); // ← nuevo
 
 app.get("/api/health", (req, res) => {
   res.json({
@@ -91,7 +125,7 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// Producción: servir frontend
+// ── Producción: servir frontend ─────────────────────────────
 if (process.env.NODE_ENV === "production") {
   const distPath = path.join(__dirname, "../dist");
   app.use(express.static(distPath));
