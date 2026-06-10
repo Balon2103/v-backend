@@ -6,7 +6,7 @@ const {
   getMesesDisponibles,
   getTiposVacuna,
 } = require("../controllers/reportesController");
-const { verifyToken, checkRol } = require("../middlewares/auth.middleware");
+const { verifyToken, checkRol } = require("../middlewares/auth");
 
 const router = Router();
 
