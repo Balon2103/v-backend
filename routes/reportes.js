@@ -5,7 +5,7 @@ const {
   getMovimientosInventario,
   getMesesDisponibles,
   getTiposVacuna,
-} = require("../controllers/reportes.controller");
+} = require("../controllers/reportesController");
 const { verifyToken, checkRol } = require("../middlewares/auth.middleware");
 
 const router = Router();
