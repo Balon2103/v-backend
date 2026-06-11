@@ -67,6 +67,21 @@ async function vacunasPorPeriodo(req, res) {
        ORDER BY fecha ASC`,
       params,
     );
+    // Agrupado por vacuna y vacunador
+    const porVacunador = await db.query(
+      `SELECT
+     tv.nombre AS vacuna,
+     COALESCE(u.nombre || ' ' || u.apellido, 'Sin asignar') AS vacunador,
+     COUNT(va.id) AS dosis,
+     COUNT(DISTINCT va.paciente_id) AS pacientes
+   FROM vacunas_aplicadas va
+   JOIN tipos_vacuna tv ON va.tipo_vacuna_id = tv.id
+   LEFT JOIN usuarios u ON va.usuario_id = u.id
+   ${where}
+   GROUP BY tv.nombre, vacunador
+   ORDER BY tv.nombre, dosis DESC`,
+      params,
+    );
 
     return res.json({
       ok: true,
@@ -89,6 +104,12 @@ async function vacunasPorPeriodo(req, res) {
       por_dia: porDia.rows.map((r) => ({
         fecha: r.fecha,
         dosis: parseInt(r.dosis),
+      })),
+      por_vacunador: porVacunador.rows.map((r) => ({
+        vacuna: r.vacuna,
+        vacunador: r.vacunador,
+        dosis: parseInt(r.dosis),
+        pacientes: parseInt(r.pacientes),
       })),
     });
   } catch (err) {
