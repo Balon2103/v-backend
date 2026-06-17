@@ -9,7 +9,8 @@ const authRoutes = require("./routes/auth");
 const vacunasRoutes = require("./routes/vacunas");
 const inventarioRoutes = require("./routes/inventario");
 const reportesRoutes = require("./routes/reportes");
-const usuariosRoutes = require("./routes/usuarios"); // ← nuevo
+const usuariosRoutes = require("./routes/usuarios");
+const dashboardRoutes = require("./routes/dashboard"); // ← nuevo
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -68,7 +69,6 @@ app.use(
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Rate limiting solo para login
 app.use(
   "/api/auth/login",
   rateLimit({
@@ -86,7 +86,8 @@ app.use("/api/auth", authRoutes);
 app.use("/api/vacunas", vacunasRoutes);
 app.use("/api/inventario", inventarioRoutes);
 app.use("/api/reportes", reportesRoutes);
-app.use("/api/usuarios", usuariosRoutes); // ← nuevo
+app.use("/api/usuarios", usuariosRoutes);
+app.use("/api/dashboard", dashboardRoutes); // ← nuevo
 
 app.get("/api/health", (req, res) => {
   res.json({
@@ -96,7 +97,6 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// ── Producción: servir frontend ─────────────────────────────
 if (process.env.NODE_ENV === "production") {
   const distPath = path.join(__dirname, "../dist");
   app.use(express.static(distPath));
